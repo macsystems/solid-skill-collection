@@ -1,0 +1,35 @@
+@startuml architecture
+' Renders to architecture.png:
+'   plantuml -tpng architecture.puml
+title <b>Dependency Inversion: api / impl split</b>\n<size:11><color:#666666>Clients depend on the contract; only the composition root knows the implementation.</color></size>
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowFontSize 11
+skinparam rectangle {
+  BorderThickness 2
+  FontSize 12
+}
+
+rectangle "Client / feature modules" as clients #line.dashed;line:9aa0a6 {
+  rectangle "Client module\n<size:10>(e.g. a feature, a ViewModel)</size>" as client #e8f0fe;line:4285f4
+  rectangle "Client test\n<size:10>mock<ComponentApi>()</size>" as test #f1f3f4;line.dashed;line:9aa0a6
+}
+
+rectangle "<b>$component-api</b>\n<size:10>interface ComponentApi</size>\n<size:10>data class SampleData</size>\n<size:10>public entry point (factory / builder)</size>" as api #e6f4ea;line:34a853
+
+rectangle "<b>$component-impl</b>\n<size:10>internal class ComponentApiImpl</size>\n<size:10>(never visible to clients)</size>" as impl #fce8e6;line:ea4335
+
+rectangle "<b>:app</b>  (composition root)\n<size:10>the ONLY module that wires impl -> api</size>" as app #fef7e0;line:f9ab00
+
+client -[#4285f4]-> api : depends on\n(contract only)
+test  -[#9aa0a6,dashed]-> api : mocks
+impl  -[#34a853]-> api : implements
+
+app -[#f9ab00]-> api
+app -[#f9ab00]-> impl : loads / wires\n(DI module, factory)
+
+client -[#ea4335,dashed]-> impl : <color:#ea4335>  NOT ALLOWED  </color>
+
+@enduml

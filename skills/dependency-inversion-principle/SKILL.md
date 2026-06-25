@@ -20,6 +20,26 @@ This split is enforced at the module level. There are (at least) two Gradle modu
 - `$component-api` — the public contract. Clients depend on this.
 - `$component-impl` — the implementation. Clients do **not** depend on this directly.
 
+![Architecture: clients and the implementation both depend on the api module; only the
+composition root (:app) wires impl into api, and a client may never depend on impl
+directly.](architecture.png)
+
+> The diagram is generated from [`architecture.puml`](architecture.puml) with
+> `plantuml -tpng architecture.puml`.
+
+While the diagram above shows the *static* module dependencies, the sequence below
+shows the *runtime* flow: the composition root wires the implementation in, the client
+obtains an instance through the public entry point, and calls then dispatch to the
+hidden implementation via the interface.
+
+![Runtime sequence: :app wires impl into api; the client calls the public entry point
+and receives a ComponentApi typed as the interface; loadData() dispatches to the
+internal ComponentApiImpl, which returns SampleData — the client never references the
+concrete class.](sequence.png)
+
+> The diagram is generated from [`sequence.puml`](sequence.puml) with
+> `plantuml -tpng sequence.puml`.
+
 ## The API module (`$component-api`)
 
 Contains only the contract: the interfaces clients call, plus any data types that are
@@ -115,23 +135,39 @@ Here only `ComponentFactory` is visible from outside; `ComponentApiImpl` remains
 
 When the component needs configuration — values that are optional, or that the client
 *must* supply before a valid instance can exist — expose a **builder** in the API module.
-The builder lets the client set the relevant configuration step by step and produces the
-interface type at the end. This keeps required wiring explicit and self-documenting while
-still hiding the implementation.
+To avoid circular module dependencies, the builder should produce a stable, read-only
+configuration data class (`ComponentConfig`) that is then passed to the factory or DI
+setup, rather than instantiating the implementation class directly inside the API module.
+This keeps required wiring explicit and self-documenting while still hiding the
+implementation.
 
 ```kotlin
 // module: $component-api
+data class ComponentConfig(
+    val timeoutMs: Long,
+    val storage: Storage,
+)
+
 class ComponentBuilder {
+    private var timeoutMs: Long = 5000L
+    private var storage: Storage? = null
+
     // optional configuration
-    fun withTimeout(ms: Long): ComponentBuilder = apply { /* ... */ }
+    fun withTimeout(ms: Long): ComponentBuilder = apply { this.timeoutMs = ms }
 
-    // mandatory configuration: build() should fail or be impossible
-    // to call without it, depending on how strict you want to be
-    fun withStorage(storage: Storage): ComponentBuilder = apply { /* ... */ }
+    // mandatory configuration: build() fails if it was never supplied
+    fun withStorage(storage: Storage): ComponentBuilder = apply { this.storage = storage }
 
-    fun build(): ComponentApi = /* hand off to the internal implementation */
+    fun build(): ComponentConfig {
+        val storage = storage ?: error("Storage is required")
+        return ComponentConfig(timeoutMs, storage)
+    }
 }
 ```
+
+The client passes the resulting `ComponentConfig` to the public entry point (the factory
+from Option B, or a DI definition), which hands it on to the `internal` implementation —
+so the API module never references the concrete class.
 
 Use a builder when there are enough configuration knobs — or hard requirements — that a
 single factory call would be awkward or easy to misuse. For one or two simple
@@ -150,7 +186,58 @@ client injects the dependency without knowing the concrete class.
 internal class ComponentApiImpl : ComponentApi { /* ... */ }
 ```
 
-This automates what the other options do by hand, at the cost of adopting the framework.
+The binding only takes effect once the implementation module is loaded at the composition
+root. With Koin Annotations you declare a module in `$component-impl` and load its
+generated `.module` extension from `:app`:
+
+```kotlin
+// module: $component-impl
+@Module
+@ComponentScan
+class ComponentImplModule
+```
+
+```kotlin
+// module: :app (composition root) — the only place allowed to depend on $component-impl
+startKoin {
+    modules(ComponentImplModule().module)
+}
+```
+
+This automates what the other options do by hand, at the cost of adopting the framework,
+and reinforces the rule that only `:app` wires the `:impl` modules into the object graph.
+
+## Unit Testing & Mocking
+
+Decoupling the API from the implementation lets client modules be tested in isolation.
+Instead of standing up real databases, networks, or a full dependency tree, the test
+mocks the public interface — and depends only on `$component-api`, never on
+`$component-impl`:
+
+```kotlin
+// module: $client-feature-test
+import dev.mokkery.answering.returns
+import dev.mokkery.everySuspend
+import dev.mokkery.mock
+import kotlinx.coroutines.test.runTest
+
+@Test
+fun viewModel_exposes_loaded_user() = runTest {
+    // Mock the stable API contract — no dependency on $component-impl
+    val mockApi = mock<ComponentApi> {
+        everySuspend { loadData() } returns SampleData("John Doe", 30)
+    }
+
+    val viewModel = MyViewModel(mockApi)
+    viewModel.loadUser()
+
+    assertEquals("John Doe", viewModel.state.value.userName)
+}
+```
+
+(`everySuspend` is used because `loadData()` is a `suspend` function; use `every` for
+non-suspending members.) Being able to mock the contract this cheaply is one of the
+strongest reasons for the api/impl split.
 
 ## What the client sees
 
