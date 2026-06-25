@@ -1,2 +1,2 @@
 # solid-skill-collection
-A collection of skills which enforcing SOLD principles 
+A collection of skills which enforcing SOLID principles 
