@@ -1,0 +1,32 @@
+@startuml sequence
+' Renders to sequence.png:
+'   plantuml -tpng sequence.puml
+title <b>Dependency Inversion: runtime sequence</b>\n<size:11><color:#666666>The client obtains and calls the contract; the implementation stays hidden behind it.</color></size>
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ParticipantBorderThickness 2
+
+participant "<b>:app</b>\n<size:9>composition root</size>" as app #fef7e0
+participant "<b>Client</b>\n<size:9>e.g. a ViewModel</size>" as client #e8f0fe
+participant "<b>$component-api</b>\n<size:9>entry point + ComponentApi</size>" as api #e6f4ea
+participant "<b>$component-impl</b>\n<size:9>internal ComponentApiImpl</size>" as impl #fce8e6
+
+== Setup (composition root) ==
+app -[#f9ab00]> impl : <color:#bb8800>1: wire / load DI module</color>
+
+== Usage (client) ==
+client -[#4285f4]> api : <color:#4285f4>2: ComponentApi() / factory.create()</color>
+activate api
+api -[#34a853]> impl : <color:#34a853>3: new ComponentApiImpl()</color>
+activate impl
+api -[#34a853,dashed]-> client : <color:#34a853>4: returns ComponentApi (interface)</color>
+deactivate api
+
+client -[#4285f4]> impl : <color:#4285f4>5: loadData()  (via interface)</color>
+impl -[#ea4335,dashed]-> client : <color:#ea4335>6: SampleData</color>
+deactivate impl
+
+@enduml
