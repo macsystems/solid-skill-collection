@@ -82,6 +82,94 @@ internal class ComponentApiImpl : ComponentApi {
 The implementation class itself is `internal`: a client could not reference
 `ComponentApiImpl` even if it wanted to, because it is not visible outside its module.
 
+## Build Configuration: Gradle & Maven Setup
+
+To enforce this boundary at compile time, configure your build tool to hide implementation details from the client modules.
+
+### Gradle Setup (via the `java-library` plugin)
+
+The `java-library` plugin introduces the distinction between `api` (transitive compile-time dependencies) and `implementation` (internal dependencies, hidden from consumers).
+
+1. **The API module (`$component-api`)**:
+   Uses the `java-library` plugin so it can declare transitive dependencies via the `api` configuration.
+   ```kotlin
+   // $component-api/build.gradle.kts
+   plugins {
+       `java-library`
+       kotlin("jvm")
+   }
+
+   dependencies {
+       // Transitively exposes dependencies that are part of the public API signatures
+       api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
+       
+       // Internal dependencies of the api module (not leaked to clients)
+       implementation("org.slf4j:slf4j-api:2.0.0")
+   }
+   ```
+
+2. **The Implementation module (`$component-impl`)**:
+   Uses `implementation` to depend on the API. All its third-party libraries (databases, HTTP clients) are kept internal.
+   ```kotlin
+   // $component-impl/build.gradle.kts
+   plugins {
+       kotlin("jvm")
+   }
+
+   dependencies {
+       // Implements the API contract
+       implementation(project(":$component-api"))
+
+       // Hidden implementation details (e.g. database, network engine)
+       implementation("io.ktor:ktor-client-cio:2.3.0")
+       implementation("io.insert-koin:koin-core:3.5.0")
+   }
+   ```
+
+3. **The Client module**:
+   Only depends on the stable API. The compiler will prevent imports from Ktor, Koin, or the concrete implementation.
+   ```kotlin
+   // $client-module/build.gradle.kts
+   dependencies {
+       implementation(project(":$component-api"))
+   }
+   ```
+
+4. **The App module (Composition Root)**:
+   Loads the implementation module. Whenever possible, declare this dependency as `runtimeOnly` to ensure developers cannot write code in the `:app` module that directly references internal classes of `:impl`.
+   ```kotlin
+   // :app/build.gradle.kts
+   dependencies {
+       implementation(project(":$component-api"))
+       runtimeOnly(project(":$component-impl")) // Exposes implementation only at runtime
+   }
+   ```
+
+### Maven Setup (via dependency scopes)
+
+In Maven, use dependency `<scope>` to control classpaths:
+
+* **Implementation Module**: Depends on `:api` with default `compile` scope.
+* **Client Module**: Depends on `:api` with `compile` scope.
+* **App Module (Composition Root)**: Declares a dependency on `:impl` with `<scope>runtime</scope>` to prevent compile-time references to implementation classes.
+
+```xml
+<!-- :app/pom.xml -->
+<dependencies>
+    <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>component-api</artifactId>
+        <version>1.0.0</version>
+    </dependency>
+    <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>component-impl</artifactId>
+        <version>1.0.0</version>
+        <scope>runtime</scope> <!-- Enforces runtime-only lookup -->
+    </dependency>
+</dependencies>
+```
+
 ## Connecting the client to the implementation
 
 The interesting question: an interface cannot do anything on its own, so the client
@@ -207,23 +295,23 @@ startKoin {
 This automates what the other options do by hand, at the cost of adopting the framework,
 and reinforces the rule that only `:app` wires the `:impl` modules into the object graph.
 
-## Unit Testing & Mocking
+## Unit Testing: Mocks vs. Fakes
 
-Decoupling the API from the implementation lets client modules be tested in isolation.
-Instead of standing up real databases, networks, or a full dependency tree, the test
-mocks the public interface — and depends only on `$component-api`, never on
-`$component-impl`:
+Decoupling the API from the implementation lets client modules be tested in isolation. Instead of standing up real databases, networks, or a full dependency tree, the test uses a **test double** (either a dynamic mock or a hand-written fake) that implements the public interface. Because clients only depend on `$component-api`, they never need `$component-impl` to run their unit tests.
+
+### Option A — Mocking with Mokkery (Kotlin Multiplatform)
+
+If the project is a Kotlin Multiplatform (KMP) project, Mokkery is a great compiler-plugin-based mocking tool:
 
 ```kotlin
-// module: $client-feature-test
+// module: $client-feature-test (KMP / Multiplatform)
 import dev.mokkery.answering.returns
 import dev.mokkery.everySuspend
 import dev.mokkery.mock
 import kotlinx.coroutines.test.runTest
 
 @Test
-fun viewModel_exposes_loaded_user() = runTest {
-    // Mock the stable API contract — no dependency on $component-impl
+fun viewModel_exposes_loaded_user_mokkery() = runTest {
     val mockApi = mock<ComponentApi> {
         everySuspend { loadData() } returns SampleData("John Doe", 30)
     }
@@ -235,9 +323,77 @@ fun viewModel_exposes_loaded_user() = runTest {
 }
 ```
 
-(`everySuspend` is used because `loadData()` is a `suspend` function; use `every` for
-non-suspending members.) Being able to mock the contract this cheaply is one of the
-strongest reasons for the api/impl split.
+(`everySuspend` is used because `loadData()` is a `suspend` function.)
+
+### Option B — Mocking with MockK (Kotlin JVM / Android)
+
+For traditional JVM or Android projects, MockK is the standard library:
+
+```kotlin
+// module: $client-feature-test (JVM / Android)
+import io.mockk.coEvery
+import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
+
+@Test
+fun viewModel_exposes_loaded_user_mockk() = runTest {
+    val mockApi = mockk<ComponentApi>()
+    coEvery { mockApi.loadData() } returns SampleData("John Doe", 30)
+
+    val viewModel = MyViewModel(mockApi)
+    viewModel.loadUser()
+
+    assertEquals("John Doe", viewModel.state.value.userName)
+}
+```
+
+(`coEvery` is used for suspending functions; use `every` for regular functions.)
+
+### Option C — Fake Implementations (Fakes)
+
+Instead of using mocking libraries (which rely on reflection or compiler plugins, compile slower, and can make tests fragile to refactoring), you can write a manual **Fake** (test double) that implements the stable API interface.
+
+Fakes can live in the client's test source set or be shared via an `:api-test` module:
+
+```kotlin
+// module: $client-feature-test or :component-api-test
+class FakeComponentApi : ComponentApi {
+    private var data: SampleData = SampleData("Default User", 25)
+    var shouldFail: Boolean = false
+
+    override suspend fun loadData(): SampleData {
+        if (shouldFail) throw IllegalStateException("Simulated network failure")
+        return data
+    }
+
+    override suspend fun saveData(data: SampleData) {
+        this.data = data
+    }
+
+    // Helper method to set up test scenarios
+    fun seedData(data: SampleData) {
+        this.data = data
+    }
+}
+```
+
+The test is clean, readable, and executes extremely fast:
+
+```kotlin
+@Test
+fun viewModel_exposes_loaded_user_fake() = runTest {
+    val fakeApi = FakeComponentApi().apply {
+        seedData(SampleData("John Doe", 30))
+    }
+
+    val viewModel = MyViewModel(fakeApi)
+    viewModel.loadUser()
+
+    assertEquals("John Doe", viewModel.state.value.userName)
+}
+```
+
+Being able to swap implementations so easily in tests is one of the strongest reasons for the api/impl split.
 
 ## What the client sees
 
@@ -252,6 +408,51 @@ val data = component.loadData()
 The client knows the interface and the entry point. It knows nothing about
 `ComponentApiImpl`, and a change to the implementation module never forces the client to
 recompile against a new type.
+
+## Common Anti-patterns
+
+Watch out for these common design mistakes that break the Dependency Inversion Principle:
+
+### Anti-pattern 1: Leaking Concrete/Internal Types in the API
+The `:api` module must not reference any concrete classes from `:impl`. Furthermore, it should not expose internal-only concepts or external libraries that clients shouldn't know about.
+
+```kotlin
+// ❌ BAD: The API interface exposes the concrete internal implementation class
+interface ComponentApi {
+    fun getImplementationDetail(): ComponentApiImpl // Compile error! API doesn't know about Impl.
+}
+
+// ❌ BAD: The API exposes a library-specific type that leaks the implementation detail
+// (e.g. database-specific exceptions or Room/SQLDelight query types)
+interface ComponentApi {
+    fun getQueryResults(): io.requery.query.Result<SampleData> // Leaks the query engine
+}
+```
+
+*Solution:* Always return stable interfaces, standard library types, or pure domain data classes declared in the `:api` module.
+
+### Anti-pattern 2: Cross-Feature `:impl` Dependencies
+A feature module `:feature-a-impl` should never declare a dependency on `:feature-b-impl`.
+
+![Anti-pattern: :feature-a-impl must only depend on :feature-b-api; direct dependency on :feature-b-impl is forbidden.](anti-pattern-cross-dependency.png)
+
+> The diagram is generated from [`anti-pattern-cross-dependency.puml`](anti-pattern-cross-dependency.puml) with
+> `plantuml -tpng anti-pattern-cross-dependency.puml`.
+
+*Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring between feature implementations must happen exclusively at the composition root (e.g. `:app` module).
+
+### Anti-pattern 3: Circular Gradle Dependencies
+This happens when you try to create an instance of the implementation directly inside the `:api` module. Because `:impl` depends on `:api`, `:api` cannot depend on `:impl` without creating a circular dependency.
+
+```kotlin
+// ❌ BAD: Creating a circular dependency by referencing the concrete implementation in API
+// module: $component-api
+object ComponentApiFactory {
+    fun create(): ComponentApi = ComponentApiImpl() // Compile error: unresolved reference
+}
+```
+
+*Solution:* Use a public entry point that delegates creation (e.g. a runtime registry / factory lambda pattern, a factory class in `:impl` referenced only by the composition root, or dependency injection).
 
 ## Summary of the rules
 
@@ -270,3 +471,4 @@ recompile against a new type.
   injection all satisfy this — choose per component.
 - Further interfaces follow the **same pattern**: declared in the API module, implemented
   `internal`ly, obtained through the public surface.
+
