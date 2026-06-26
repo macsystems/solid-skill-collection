@@ -1,0 +1,31 @@
+@startuml anti-pattern-cross-dependency
+' Renders to anti-pattern-cross-dependency.png:
+'   plantuml -tpng anti-pattern-cross-dependency.puml
+title <b>Anti-pattern: Cross-Feature :impl Dependency</b>\n<size:11><color:#666666>Feature implementations must never depend directly on each other.</color></size>
+
+skinparam backgroundColor white
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam ArrowFontSize 11
+skinparam rectangle {
+  BorderThickness 2
+  FontSize 12
+}
+
+rectangle "<b>Feature A</b>" as featureA #line.dashed;line:9aa0a6 {
+  rectangle "<b>:feature-a-api</b>" as aApi #e6f4ea;line:34a853
+  rectangle "<b>:feature-a-impl</b>" as aImpl #fce8e6;line:ea4335
+}
+
+rectangle "<b>Feature B</b>" as featureB #line.dashed;line:9aa0a6 {
+  rectangle "<b>:feature-b-api</b>" as bApi #e6f4ea;line:34a853
+  rectangle "<b>:feature-b-impl</b>" as bImpl #fce8e6;line:ea4335
+}
+
+aImpl -[#34a853]-> aApi : implements
+bImpl -[#34a853]-> bApi : implements
+
+aImpl -[#4285f4]-> bApi : depends on\n(allowed)
+aImpl -[#ea4335,bold]-> bImpl : <color:#ea4335>❌ DIRECT DEPENDENCY\n(FORBIDDEN)</color>
+
+@enduml

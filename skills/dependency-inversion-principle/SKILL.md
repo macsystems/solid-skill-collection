@@ -346,23 +346,10 @@ interface ComponentApi {
 ### Anti-pattern 2: Cross-Feature `:impl` Dependencies
 A feature module `:feature-a-impl` should never declare a dependency on `:feature-b-impl`.
 
-```
-[Feature A]                  [Feature B]
-+-----------------+          +-----------------+
-| :feature-a-api  |          | :feature-b-api  |
-+-----------------+          +-----------------+
-        ^                            ^
-        |                            |
-+-----------------+                  |
-| :feature-a-impl |------------------+
-+-----------------+
-        :
-        : ❌ Direct dependency is forbidden!
-        v
-+-----------------+
-| :feature-b-impl |
-+-----------------+
-```
+![Anti-pattern: :feature-a-impl must only depend on :feature-b-api; direct dependency on :feature-b-impl is forbidden.](anti-pattern-cross-dependency.png)
+
+> The diagram is generated from [`anti-pattern-cross-dependency.puml`](anti-pattern-cross-dependency.puml) with
+> `plantuml -tpng anti-pattern-cross-dependency.puml`.
 
 *Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring between feature implementations must happen exclusively at the composition root (e.g. `:app` module).
 
