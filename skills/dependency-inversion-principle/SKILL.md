@@ -209,20 +209,21 @@ and reinforces the rule that only `:app` wires the `:impl` modules into the obje
 
 ## Unit Testing & Mocking
 
-Decoupling the API from the implementation lets client modules be tested in isolation.
-Instead of standing up real databases, networks, or a full dependency tree, the test
-mocks the public interface — and depends only on `$component-api`, never on
-`$component-impl`:
+Decoupling the API from the implementation lets client modules be tested in isolation. Instead of standing up real databases, networks, or a full dependency tree, the test mocks the public interface — and depends only on `$component-api`, never on `$component-impl`.
+
+### Option A — Mocking with Mokkery (Kotlin Multiplatform)
+
+If the project is a Kotlin Multiplatform (KMP) project, Mokkery is a great compiler-plugin-based mocking tool:
 
 ```kotlin
-// module: $client-feature-test
+// module: $client-feature-test (KMP / Multiplatform)
 import dev.mokkery.answering.returns
 import dev.mokkery.everySuspend
 import dev.mokkery.mock
 import kotlinx.coroutines.test.runTest
 
 @Test
-fun viewModel_exposes_loaded_user() = runTest {
+fun viewModel_exposes_loaded_user_mokkery() = runTest {
     // Mock the stable API contract — no dependency on $component-impl
     val mockApi = mock<ComponentApi> {
         everySuspend { loadData() } returns SampleData("John Doe", 30)
@@ -235,9 +236,32 @@ fun viewModel_exposes_loaded_user() = runTest {
 }
 ```
 
-(`everySuspend` is used because `loadData()` is a `suspend` function; use `every` for
-non-suspending members.) Being able to mock the contract this cheaply is one of the
-strongest reasons for the api/impl split.
+(`everySuspend` is used because `loadData()` is a `suspend` function; use `every` for non-suspending members.)
+
+### Option B — Mocking with MockK (Kotlin JVM / Android)
+
+For traditional JVM or Android projects, MockK is the standard library:
+
+```kotlin
+// module: $client-feature-test (JVM / Android)
+import io.mockk.coEvery
+import io.mockk.mockk
+import kotlinx.coroutines.test.runTest
+
+@Test
+fun viewModel_exposes_loaded_user_mockk() = runTest {
+    // Mock the stable API contract — no dependency on $component-impl
+    val mockApi = mockk<ComponentApi>()
+    coEvery { mockApi.loadData() } returns SampleData("John Doe", 30)
+
+    val viewModel = MyViewModel(mockApi)
+    viewModel.loadUser()
+
+    assertEquals("John Doe", viewModel.state.value.userName)
+}
+```
+
+(`coEvery` is used for suspending functions; use `every` for regular functions.) Being able to mock the contract this cheaply is one of the strongest reasons for the api/impl split.
 
 ## What the client sees
 
@@ -252,6 +276,60 @@ val data = component.loadData()
 The client knows the interface and the entry point. It knows nothing about
 `ComponentApiImpl`, and a change to the implementation module never forces the client to
 recompile against a new type.
+
+## Common Anti-patterns
+
+Watch out for these common design mistakes that break the Dependency Inversion Principle:
+
+### Anti-pattern 1: Leaking Concrete/Internal Types in the API
+The `:api` module must not reference any concrete classes from `:impl`. Furthermore, it should not expose internal-only concepts or external libraries that clients shouldn't know about.
+
+```kotlin
+// ❌ BAD: The API interface exposes the concrete internal implementation class
+interface ComponentApi {
+    fun getImplementationDetail(): ComponentApiImpl // Compile error! API doesn't know about Impl.
+}
+
+// ❌ BAD: The API exposes a library-specific type that leaks the implementation detail
+// (e.g. database-specific exceptions or Room/SQLDelight query types)
+interface ComponentApi {
+    fun getQueryResults(): io.requery.query.Result<SampleData> // Leaks the query engine
+}
+```
+
+*Solution:* Always return stable interfaces, standard library types, or pure domain data classes declared in the `:api` module.
+
+### Anti-pattern 2: Cross-Feature `:impl` Dependencies
+A feature module `:feature-a-impl` should never declare a dependency on `:feature-b-impl`.
+
+```mermaid
+graph TD
+    subgraph Feature A
+        A_API[":feature-a-api"]
+        A_IMPL[":feature-a-impl"]
+    end
+    subgraph Feature B
+        B_API[":feature-b-api"]
+        B_IMPL[":feature-b-impl"]
+    end
+    A_IMPL --> B_API
+    A_IMPL -. "❌ Direct Dependency" .-> B_IMPL
+```
+
+*Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring between feature implementations must happen exclusively at the composition root (e.g. `:app` module).
+
+### Anti-pattern 3: Circular Gradle Dependencies
+This happens when you try to create an instance of the implementation directly inside the `:api` module. Because `:impl` depends on `:api`, `:api` cannot depend on `:impl` without creating a circular dependency.
+
+```kotlin
+// ❌ BAD: Creating a circular dependency by referencing the concrete implementation in API
+// module: $component-api
+object ComponentApiFactory {
+    fun create(): ComponentApi = ComponentApiImpl() // Compile error: unresolved reference
+}
+```
+
+*Solution:* Use a public entry point that delegates creation (e.g. a runtime registry / factory lambda pattern, a factory class in `:impl` referenced only by the composition root, or dependency injection).
 
 ## Summary of the rules
 
@@ -270,3 +348,4 @@ recompile against a new type.
   injection all satisfy this — choose per component.
 - Further interfaces follow the **same pattern**: declared in the API module, implemented
   `internal`ly, obtained through the public surface.
+
