@@ -82,6 +82,94 @@ internal class ComponentApiImpl : ComponentApi {
 The implementation class itself is `internal`: a client could not reference
 `ComponentApiImpl` even if it wanted to, because it is not visible outside its module.
 
+## Build Configuration: Gradle & Maven Setup
+
+To enforce this boundary at compile time, configure your build tool to hide implementation details from the client modules.
+
+### Gradle Setup (via the `java-library` plugin)
+
+The `java-library` plugin introduces the distinction between `api` (transitive compile-time dependencies) and `implementation` (internal dependencies, hidden from consumers).
+
+1. **The API module (`$component-api`)**:
+   Uses the `java-library` plugin so it can declare transitive dependencies via the `api` configuration.
+   ```kotlin
+   // $component-api/build.gradle.kts
+   plugins {
+       `java-library`
+       kotlin("jvm")
+   }
+
+   dependencies {
+       // Transitively exposes dependencies that are part of the public API signatures
+       api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
+       
+       // Internal dependencies of the api module (not leaked to clients)
+       implementation("org.slf4j:slf4j-api:2.0.0")
+   }
+   ```
+
+2. **The Implementation module (`$component-impl`)**:
+   Uses `implementation` to depend on the API. All its third-party libraries (databases, HTTP clients) are kept internal.
+   ```kotlin
+   // $component-impl/build.gradle.kts
+   plugins {
+       kotlin("jvm")
+   }
+
+   dependencies {
+       // Implements the API contract
+       implementation(project(":$component-api"))
+
+       // Hidden implementation details (e.g. database, network engine)
+       implementation("io.ktor:ktor-client-cio:2.3.0")
+       implementation("io.insert-koin:koin-core:3.5.0")
+   }
+   ```
+
+3. **The Client module**:
+   Only depends on the stable API. The compiler will prevent imports from Ktor, Koin, or the concrete implementation.
+   ```kotlin
+   // $client-module/build.gradle.kts
+   dependencies {
+       implementation(project(":$component-api"))
+   }
+   ```
+
+4. **The App module (Composition Root)**:
+   Loads the implementation module. Whenever possible, declare this dependency as `runtimeOnly` to ensure developers cannot write code in the `:app` module that directly references internal classes of `:impl`.
+   ```kotlin
+   // :app/build.gradle.kts
+   dependencies {
+       implementation(project(":$component-api"))
+       runtimeOnly(project(":$component-impl")) // Exposes implementation only at runtime
+   }
+   ```
+
+### Maven Setup (via dependency scopes)
+
+In Maven, use dependency `<scope>` to control classpaths:
+
+* **Implementation Module**: Depends on `:api` with default `compile` scope.
+* **Client Module**: Depends on `:api` with `compile` scope.
+* **App Module (Composition Root)**: Declares a dependency on `:impl` with `<scope>runtime</scope>` to prevent compile-time references to implementation classes.
+
+```xml
+<!-- :app/pom.xml -->
+<dependencies>
+    <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>component-api</artifactId>
+        <version>1.0.0</version>
+    </dependency>
+    <dependency>
+        <groupId>com.example</groupId>
+        <artifactId>component-impl</artifactId>
+        <version>1.0.0</version>
+        <scope>runtime</scope> <!-- Enforces runtime-only lookup -->
+    </dependency>
+</dependencies>
+```
+
 ## Connecting the client to the implementation
 
 The interesting question: an interface cannot do anything on its own, so the client
