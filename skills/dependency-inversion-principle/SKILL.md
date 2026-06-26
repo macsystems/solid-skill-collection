@@ -207,9 +207,9 @@ startKoin {
 This automates what the other options do by hand, at the cost of adopting the framework,
 and reinforces the rule that only `:app` wires the `:impl` modules into the object graph.
 
-## Unit Testing & Mocking
+## Unit Testing: Mocks vs. Fakes
 
-Decoupling the API from the implementation lets client modules be tested in isolation. Instead of standing up real databases, networks, or a full dependency tree, the test mocks the public interface — and depends only on `$component-api`, never on `$component-impl`.
+Decoupling the API from the implementation lets client modules be tested in isolation. Instead of standing up real databases, networks, or a full dependency tree, the test uses a **test double** (either a dynamic mock or a hand-written fake) that implements the public interface. Because clients only depend on `$component-api`, they never need `$component-impl` to run their unit tests.
 
 ### Option A — Mocking with Mokkery (Kotlin Multiplatform)
 
@@ -224,7 +224,6 @@ import kotlinx.coroutines.test.runTest
 
 @Test
 fun viewModel_exposes_loaded_user_mokkery() = runTest {
-    // Mock the stable API contract — no dependency on $component-impl
     val mockApi = mock<ComponentApi> {
         everySuspend { loadData() } returns SampleData("John Doe", 30)
     }
@@ -236,7 +235,7 @@ fun viewModel_exposes_loaded_user_mokkery() = runTest {
 }
 ```
 
-(`everySuspend` is used because `loadData()` is a `suspend` function; use `every` for non-suspending members.)
+(`everySuspend` is used because `loadData()` is a `suspend` function.)
 
 ### Option B — Mocking with MockK (Kotlin JVM / Android)
 
@@ -250,7 +249,6 @@ import kotlinx.coroutines.test.runTest
 
 @Test
 fun viewModel_exposes_loaded_user_mockk() = runTest {
-    // Mock the stable API contract — no dependency on $component-impl
     val mockApi = mockk<ComponentApi>()
     coEvery { mockApi.loadData() } returns SampleData("John Doe", 30)
 
@@ -261,7 +259,53 @@ fun viewModel_exposes_loaded_user_mockk() = runTest {
 }
 ```
 
-(`coEvery` is used for suspending functions; use `every` for regular functions.) Being able to mock the contract this cheaply is one of the strongest reasons for the api/impl split.
+(`coEvery` is used for suspending functions; use `every` for regular functions.)
+
+### Option C — Fake Implementations (Fakes)
+
+Instead of using mocking libraries (which rely on reflection or compiler plugins, compile slower, and can make tests fragile to refactoring), you can write a manual **Fake** (test double) that implements the stable API interface.
+
+Fakes can live in the client's test source set or be shared via an `:api-test` module:
+
+```kotlin
+// module: $client-feature-test or :component-api-test
+class FakeComponentApi : ComponentApi {
+    private var data: SampleData = SampleData("Default User", 25)
+    var shouldFail: Boolean = false
+
+    override suspend fun loadData(): SampleData {
+        if (shouldFail) throw IllegalStateException("Simulated network failure")
+        return data
+    }
+
+    override suspend fun saveData(data: SampleData) {
+        this.data = data
+    }
+
+    // Helper method to set up test scenarios
+    fun seedData(data: SampleData) {
+        this.data = data
+    }
+}
+```
+
+The test is clean, readable, and executes extremely fast:
+
+```kotlin
+@Test
+fun viewModel_exposes_loaded_user_fake() = runTest {
+    val fakeApi = FakeComponentApi().apply {
+        seedData(SampleData("John Doe", 30))
+    }
+
+    val viewModel = MyViewModel(fakeApi)
+    viewModel.loadUser()
+
+    assertEquals("John Doe", viewModel.state.value.userName)
+}
+```
+
+Being able to swap implementations so easily in tests is one of the strongest reasons for the api/impl split.
 
 ## What the client sees
 
