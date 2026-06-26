@@ -346,18 +346,22 @@ interface ComponentApi {
 ### Anti-pattern 2: Cross-Feature `:impl` Dependencies
 A feature module `:feature-a-impl` should never declare a dependency on `:feature-b-impl`.
 
-```mermaid
-graph TD
-    subgraph Feature A
-        A_API[":feature-a-api"]
-        A_IMPL[":feature-a-impl"]
-    end
-    subgraph Feature B
-        B_API[":feature-b-api"]
-        B_IMPL[":feature-b-impl"]
-    end
-    A_IMPL --> B_API
-    A_IMPL -. "❌ Direct Dependency" .-> B_IMPL
+```
+[Feature A]                  [Feature B]
++-----------------+          +-----------------+
+| :feature-a-api  |          | :feature-b-api  |
++-----------------+          +-----------------+
+        ^                            ^
+        |                            |
++-----------------+                  |
+| :feature-a-impl |------------------+
++-----------------+
+        :
+        : ❌ Direct dependency is forbidden!
+        v
++-----------------+
+| :feature-b-impl |
++-----------------+
 ```
 
 *Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring between feature implementations must happen exclusively at the composition root (e.g. `:app` module).
