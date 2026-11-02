@@ -14,21 +14,21 @@ skinparam rectangle {
 
 rectangle "Client / feature modules" as clients #line.dashed;line:9aa0a6 {
   rectangle "Client module\n<size:10>(e.g. a feature, a ViewModel)</size>" as client #e8f0fe;line:4285f4
-  rectangle "Client test\n<size:10>mock<ComponentApi>()</size>" as test #f1f3f4;line.dashed;line:9aa0a6
+  rectangle "Client test\n<size:10>mock<ComponentApi>() / FakeComponentApi</size>" as test #f1f3f4;line.dashed;line:9aa0a6
 }
 
-rectangle "<b>$component-api</b>\n<size:10>interface ComponentApi</size>\n<size:10>data class SampleData</size>\n<size:10>public entry point (factory / builder)</size>" as api #e6f4ea;line:34a853
+rectangle "<b>$component-api</b>\n<size:10>interface ComponentApi</size>\n<size:10>class SampleData, ComponentConfig</size>" as api #e6f4ea;line:34a853
 
-rectangle "<b>$component-impl</b>\n<size:10>internal class ComponentApiImpl</size>\n<size:10>(never visible to clients)</size>" as impl #fce8e6;line:ea4335
+rectangle "<b>$component-impl</b>\n<size:10>public ComponentFactory / DI module</size>\n<size:10>internal class ComponentApiImpl</size>" as impl #fce8e6;line:ea4335
 
-rectangle "<b>:app</b>  (composition root)\n<size:10>the ONLY module that wires impl -> api</size>" as app #fef7e0;line:f9ab00
+rectangle "<b>Composition root</b>\n<size:10>one per runnable target (app, server, ...)</size>\n<size:10>the ONLY kind of module that references impl</size>" as app #fef7e0;line:f9ab00
 
 client -[#4285f4]-> api : depends on\n(contract only)
-test  -[#9aa0a6,dashed]-> api : mocks
-impl  -[#34a853]-> api : implements
+test  -[#9aa0a6,dashed]-> api : mocks / fakes
+impl  -[#34a853]-> api : implements\n(api(...))
 
 app -[#f9ab00]-> api
-app -[#f9ab00]-> impl : loads / wires\n(DI module, factory)
+app -[#f9ab00]-> impl : creates / wires\n(factory, DI module)
 
 client -[#ea4335,dashed]-> impl : <color:#ea4335>  NOT ALLOWED  </color>
 

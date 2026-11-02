@@ -1,7 +1,7 @@
 @startuml sequence
 ' Renders to sequence.png:
 '   plantuml -tpng sequence.puml
-title <b>Dependency Inversion: runtime sequence</b>\n<size:11><color:#666666>The client obtains and calls the contract; the implementation stays hidden behind it.</color></size>
+title <b>Dependency Inversion: runtime sequence</b>\n<size:11><color:#666666>The composition root creates and injects; the client only ever sees the interface.</color></size>
 
 skinparam backgroundColor white
 skinparam defaultFontName Helvetica
@@ -9,24 +9,25 @@ skinparam shadowing false
 skinparam sequenceMessageAlign center
 skinparam ParticipantBorderThickness 2
 
-participant "<b>:app</b>\n<size:9>composition root</size>" as app #fef7e0
+participant "<b>Composition root</b>\n<size:9>e.g. the app module</size>" as app #fef7e0
 participant "<b>Client</b>\n<size:9>e.g. a ViewModel</size>" as client #e8f0fe
-participant "<b>$component-api</b>\n<size:9>entry point + ComponentApi</size>" as api #e6f4ea
-participant "<b>$component-impl</b>\n<size:9>internal ComponentApiImpl</size>" as impl #fce8e6
+participant "<b>$component-api</b>\n<size:9>interface ComponentApi</size>" as api #e6f4ea
+participant "<b>$component-impl</b>\n<size:9>public ComponentFactory</size>\n<size:9>internal ComponentApiImpl</size>" as impl #fce8e6
 
 == Setup (composition root) ==
-app -[#f9ab00]> impl : <color:#bb8800>1: wire / load DI module</color>
+app -[#f9ab00]> impl : <color:#bb8800>1: ComponentFactory.create(storage, config)</color>
+activate impl
+impl -[#f9ab00,dashed]-> app : <color:#bb8800>2: returns ComponentApi (interface type)</color>
+deactivate impl
+app -[#f9ab00]> client : <color:#bb8800>3: MyViewModel(component)  (constructor / DI)</color>
 
 == Usage (client) ==
-client -[#4285f4]> api : <color:#4285f4>2: ComponentApi() / factory.create()</color>
+client -[#4285f4]> api : <color:#4285f4>4: component.loadData()</color>
 activate api
-api -[#34a853]> impl : <color:#34a853>3: new ComponentApiImpl()</color>
+api -[#34a853]> impl : <color:#34a853>5: dispatch to ComponentApiImpl</color>
 activate impl
-api -[#34a853,dashed]-> client : <color:#34a853>4: returns ComponentApi (interface)</color>
-deactivate api
-
-client -[#4285f4]> impl : <color:#4285f4>5: loadData()  (via interface)</color>
-impl -[#ea4335,dashed]-> client : <color:#ea4335>6: SampleData</color>
+impl -[#34a853,dashed]-> client : <color:#34a853>6: SampleData</color>
 deactivate impl
+deactivate api
 
 @enduml

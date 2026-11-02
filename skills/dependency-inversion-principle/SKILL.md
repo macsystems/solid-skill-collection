@@ -1,49 +1,58 @@
 ---
 name: dependency-inversion-principle
-description: How to create decoupled software components in a multi-module Gradle/Kotlin project by splitting each component into a stable public API surface and a hidden implementation, so clients depend only on a contract and never on internal details. Use this skill whenever the user wants to structure a feature or component into api/impl modules, expose a public entry point (factory, builder, or DI binding) without leaking the concrete class, enforce module-coupling rules (composition root, no cross-feature :impl dependencies), or apply the Dependency Inversion Principle in a Gradle/Kotlin codebase — even if they don't name the principle explicitly and just describe wanting "decoupled modules", "an api and impl split", or "clients that shouldn't see the implementation".
+description: How to create decoupled software components in a multi-module Gradle/Kotlin project by splitting each component into a stable public API surface and a hidden implementation, so clients depend only on a contract and never on internal details. Use this skill whenever the user wants to structure a feature or component into api/impl modules, expose a public entry point (factory, configuration, or DI binding) without leaking the concrete class, enforce module-coupling rules (composition root, no cross-feature :impl dependencies), keep a module's public API stable, or apply the Dependency Inversion Principle in a Gradle/Kotlin or Kotlin Multiplatform codebase — even if they don't name the principle explicitly and just describe wanting "decoupled modules", "an api and impl split", or "clients that shouldn't see the implementation".
 ---
 
 # Creating Decoupled Components
 
-This skill describes how to create a decoupled software component in a project. A
-component is split into a public **API surface** and a hidden **implementation**, so
-that clients depend only on a stable contract and never on internal details.
+This skill describes how to create a decoupled software component. A component is split
+into a public **API surface** and a hidden **implementation**, so that clients depend only
+on a stable contract and never on internal details.
 
 ## Core idea
 
-A component exposes an API surface to its users. This surface is a contract: it should
-not change except for a major version bump. Everything else — the implementation — is
-free to change at any time, because clients never see it.
+A component exposes an API surface to its users. This surface is a contract: it should not
+change in a breaking way except for a major version bump. Everything else — the
+implementation — is free to change at any time, because clients never see it.
 
 This split is enforced at the module level. There are (at least) two Gradle modules:
 
 - `$component-api` — the public contract. Clients depend on this.
 - `$component-impl` — the implementation. Clients do **not** depend on this directly.
 
+Naming is a team choice; flat (`:component-api`, `:component-impl`) and nested
+(`:component:api`, `:component:impl`) layouts work equally well. With nested modules, two
+leaf modules both called `api` produce identically named artifacts (`api.jar`, `api.klib`) —
+give each module a unique archive / artifact name (e.g. `base.archivesName` or the
+publication's `artifactId`), or the build may pick the wrong one.
+
 ![Architecture: clients and the implementation both depend on the api module; only the
-composition root (:app) wires impl into api, and a client may never depend on impl
+composition root wires impl in, and a client may never depend on impl
 directly.](architecture.png)
 
 > The diagram is generated from [`architecture.puml`](architecture.puml) with
 > `plantuml -tpng architecture.puml`.
 
-While the diagram above shows the *static* module dependencies, the sequence below
-shows the *runtime* flow: the composition root wires the implementation in, the client
-obtains an instance through the public entry point, and calls then dispatch to the
-hidden implementation via the interface.
+## When to split — and when not
 
-![Runtime sequence: :app wires impl into api; the client calls the public entry point
-and receives a ComponentApi typed as the interface; loadData() dispatches to the
-internal ComponentApiImpl, which returns SampleData — the client never references the
-concrete class.](sequence.png)
+The split costs two modules, an entry point and a little ceremony. It pays off when at
+least one of these holds:
 
-> The diagram is generated from [`sequence.puml`](sequence.puml) with
-> `plantuml -tpng sequence.puml`.
+- **Several clients** use the component (features, apps, platforms).
+- The implementation pulls in **heavy or volatile dependencies** (database, HTTP client,
+  platform SDK) that clients should not compile against.
+- Clients must be **testable without** the real implementation.
+- The implementation is expected to be **swapped** (per platform, per environment, fake vs
+  real).
+
+For a pure helper with no I/O and a single caller, a plain `internal` class in the caller's
+module is simpler. Splitting later is cheap as long as callers already go through an
+interface.
 
 ## The API module (`$component-api`)
 
-Contains only the contract: the interfaces clients call, plus any data types that are
-part of the public surface. Nothing here exposes how the work is actually done.
+Contains only the contract: the interfaces clients call, plus any data types that are part
+of the public surface. Nothing here exposes how the work is actually done.
 
 ```kotlin
 // module: $component-api
@@ -59,10 +68,31 @@ interface ComponentApi {
 Both `ComponentApi` and `SampleData` are part of the public API. Neither can change in a
 breaking way without a major version bump (Semantic Versioning).
 
+Rules for the API module:
+
+- **Keep it light.** No database, network or platform libraries. Standard-library types,
+  coroutines/`Flow` and serialization annotations are fine — they are part of the
+  vocabulary, not of an implementation.
+- **Only expose what clients need.** Every public declaration is a promise.
+- **Turn on explicit API mode** so nothing becomes public by accident:
+
+  ```kotlin
+  kotlin { explicitApi() }
+  ```
+
+- **Guard the binary contract** when the module is published or consumed by separately
+  compiled code: use ABI validation (the Kotlin Gradle plugin's built-in ABI validation or
+  the `binary-compatibility-validator` plugin). It writes a reviewable `.api` dump and fails
+  the build on unintended changes.
+- **Be careful with `data class` in a published API.** Adding a property changes the
+  constructor, `copy()` and `componentN()` — a binary-breaking change. For published
+  libraries prefer a regular class with explicit `equals`/`hashCode`/`toString` (or a
+  generator such as Poko). Inside a closed project a `data class` is fine.
+
 > If the component lives inside a closed internal project and is never published (e.g.
 > not pushed to Maven Central), strict versioning matters less, since there are no
-> external consumers to break. The *discipline* of keeping the surface stable still
-> pays off, because it keeps internal callers decoupled.
+> external consumers to break. The *discipline* of keeping the surface small and stable
+> still pays off, because it keeps internal callers decoupled.
 
 ## The implementation module (`$component-impl`)
 
@@ -73,25 +103,36 @@ nothing leaks accidentally.
 ```kotlin
 // module: $component-impl
 
-internal class ComponentApiImpl : ComponentApi {
+internal class ComponentApiImpl(
+    private val storage: Storage,
+) : ComponentApi {
     override suspend fun loadData(): SampleData { /* ... */ }
     override suspend fun saveData(data: SampleData) { /* ... */ }
 }
 ```
 
 The implementation class itself is `internal`: a client could not reference
-`ComponentApiImpl` even if it wanted to, because it is not visible outside its module.
+`ComponentApiImpl` even if it wanted to, because it is not visible outside its module. Its
+own tests still can — a module's test source set sees its `internal` declarations.
 
 ## Build Configuration: Gradle & Maven Setup
 
-To enforce this boundary at compile time, configure your build tool to hide implementation details from the client modules.
+To enforce this boundary at compile time, configure your build tool to hide implementation
+details from the client modules.
 
 ### Gradle Setup (via the `java-library` plugin)
 
-The `java-library` plugin introduces the distinction between `api` (transitive compile-time dependencies) and `implementation` (internal dependencies, hidden from consumers).
+The `java-library` plugin introduces the distinction between `api` (transitive compile-time
+dependencies) and `implementation` (internal dependencies, hidden from consumers). In a
+Kotlin Multiplatform module the same two configurations exist per source set
+(`commonMain.dependencies { api(...); implementation(...) }`).
+
+The rule of thumb: **a dependency whose types appear in a public signature of your module is
+`api`; everything else is `implementation`.**
 
 1. **The API module (`$component-api`)**:
-   Uses the `java-library` plugin so it can declare transitive dependencies via the `api` configuration.
+   Uses the `java-library` plugin so it can declare transitive dependencies via the `api`
+   configuration.
    ```kotlin
    // $component-api/build.gradle.kts
    plugins {
@@ -102,23 +143,26 @@ The `java-library` plugin introduces the distinction between `api` (transitive c
    dependencies {
        // Transitively exposes dependencies that are part of the public API signatures
        api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
-       
+
        // Internal dependencies of the api module (not leaked to clients)
        implementation("org.slf4j:slf4j-api:2.0.0")
    }
    ```
 
 2. **The Implementation module (`$component-impl`)**:
-   Uses `implementation` to depend on the API. All its third-party libraries (databases, HTTP clients) are kept internal.
+   Exposes the API module via `api`, because its public entry point (factory, DI module)
+   returns API types — whoever wires the impl needs them on the compile classpath. All
+   third-party libraries (databases, HTTP clients) stay `implementation`.
    ```kotlin
    // $component-impl/build.gradle.kts
    plugins {
+       `java-library`
        kotlin("jvm")
    }
 
    dependencies {
-       // Implements the API contract
-       implementation(project(":$component-api"))
+       // Implements the API contract; its types appear in the public entry point
+       api(project(":$component-api"))
 
        // Hidden implementation details (e.g. database, network engine)
        implementation("io.ktor:ktor-client-cio:2.3.0")
@@ -126,8 +170,13 @@ The `java-library` plugin introduces the distinction between `api` (transitive c
    }
    ```
 
+   Never let an `internal` impl type or an `implementation`-only dependency type leak into
+   a public signature. On the JVM this surfaces as a compile error at the consumer; on
+   Kotlin/Native and Kotlin/Wasm it can compile and then fail at link time or at runtime.
+
 3. **The Client module**:
-   Only depends on the stable API. The compiler will prevent imports from Ktor, Koin, or the concrete implementation.
+   Only depends on the stable API. The compiler will prevent imports from Ktor, Koin, or the
+   concrete implementation.
    ```kotlin
    // $client-module/build.gradle.kts
    dependencies {
@@ -136,12 +185,18 @@ The `java-library` plugin introduces the distinction between `api` (transitive c
    ```
 
 4. **The App module (Composition Root)**:
-   Loads the implementation module. Whenever possible, declare this dependency as `runtimeOnly` to ensure developers cannot write code in the `:app` module that directly references internal classes of `:impl`.
+   Depends on the implementation module; which configuration depends on how the instance is obtained:
+   - It **calls the impl's public factory or DI module** (Options A–C below): the
+     composition root needs the impl at compile time, so use `implementation`.
+   - The impl is **discovered at runtime** without any compile-time reference (e.g. Java's
+     `ServiceLoader` on the JVM): declare it `runtimeOnly`, so no code in the composition
+     root can reference impl classes at all.
    ```kotlin
    // :app/build.gradle.kts
    dependencies {
        implementation(project(":$component-api"))
-       runtimeOnly(project(":$component-impl")) // Exposes implementation only at runtime
+       implementation(project(":$component-impl")) // calls ComponentFactory.create(...)
+       // runtimeOnly(project(":$component-impl"))  // only with runtime discovery (ServiceLoader)
    }
    ```
 
@@ -151,10 +206,12 @@ In Maven, use dependency `<scope>` to control classpaths:
 
 * **Implementation Module**: Depends on `:api` with default `compile` scope.
 * **Client Module**: Depends on `:api` with `compile` scope.
-* **App Module (Composition Root)**: Declares a dependency on `:impl` with `<scope>runtime</scope>` to prevent compile-time references to implementation classes.
+* **App Module (Composition Root)**: Depends on `:impl` with `compile` scope when it calls the
+  impl's factory; with `<scope>runtime</scope>` when the impl is discovered at runtime
+  (`ServiceLoader`), which prevents any compile-time reference to implementation classes.
 
 ```xml
-<!-- :app/pom.xml -->
+<!-- :app/pom.xml — runtime discovery variant -->
 <dependencies>
     <dependency>
         <groupId>com.example</groupId>
@@ -172,114 +229,109 @@ In Maven, use dependency `<scope>` to control classpaths:
 
 ## Connecting the client to the implementation
 
-The interesting question: an interface cannot do anything on its own, so the client
-needs an actual instance — but it must obtain one **without depending on the impl
-module**. The component therefore has to provide a public **entry point** that hands out
-an instance typed as the interface.
+The interesting question: an interface cannot do anything on its own, so the client needs an
+actual instance — but it must obtain one **without depending on the impl module**. The
+answer is to invert who creates it: the **composition root** creates the instance through a
+public entry point of the impl module and **hands it to the client** (constructor parameter
+or DI). The client only ever sees the interface type.
 
-The public part typically exposes a **factory**, but a factory is not the only option —
-use whatever construction shape fits the component. What matters is that the entry point
-is public, lives in (or is reachable via) the API surface, and returns the interface
-type, never the concrete class.
+![Runtime sequence: the composition root creates the instance through the impl module's
+public factory, receives it typed as ComponentApi and injects it into the client; the
+client calls loadData() on the interface and the call dispatches to the internal
+implementation.](sequence.png)
+
+> The diagram is generated from [`sequence.puml`](sequence.puml) with
+> `plantuml -tpng sequence.puml`.
 
 ### The public entry point is part of the contract
 
-Whatever construction shape you pick lives in the public surface and is therefore subject
-to the same stability rule as the rest of the API: it should not change in a breaking way
-between major versions. Further interfaces returned or required by the entry point follow
-the **same pattern** — they are declared in the API module, implemented `internal`ly, and
-obtained only through the public surface.
+Whatever construction shape you pick is public and therefore subject to the same stability
+rule as the rest of the API: it should not change in a breaking way between major versions.
+Further interfaces returned or required by the entry point follow the **same pattern** —
+they are declared in the API module, implemented `internal`ly, and obtained only through the
+public surface.
 
-### Option A — Factory function in the API module
+### Option A — Factory in the impl module (default)
 
-The API module declares the factory; the impl module provides the body. The client calls
-the factory and receives a `ComponentApi`, never knowing the concrete type.
-
-```kotlin
-// module: $component-api
-fun ComponentApi(/* required collaborators */): ComponentApi = createComponentApi(/* ... */)
-```
-
-This is the lightest-weight option, but requires a runtime registry pattern (e.g., a
-factory lambda registered by the `:impl` module at startup), because the API module cannot
-statically reference the implementation class due to Gradle dependency constraints.
-
-### Option B — Factory object exposed by the impl module
-
-The impl module exposes one public factory; everything else stays `internal`. The client
-depends on `$component-api` for the *type* and calls the factory only at the composition
-root.
+The impl module exposes exactly one public factory; everything else stays `internal`. The
+factory returns the interface type, never the concrete class.
 
 ```kotlin
 // module: $component-impl
 object ComponentFactory {
-    fun create(/* required collaborators */): ComponentApi = ComponentApiImpl(/* ... */)
+    fun create(storage: Storage): ComponentApi = ComponentApiImpl(storage)
 }
 ```
 
-Here only `ComponentFactory` is visible from outside; `ComponentApiImpl` remains hidden.
+A top-level "pseudo-constructor" function is an equally idiomatic shape
+(`fun ComponentApi(storage: Storage): ComponentApi = ComponentApiImpl(storage)`), in the
+spirit of `MutableStateFlow(...)` or `Json { }`.
 
-### Option C — Builder in the API module (for configuration)
+Only the composition root calls the factory; clients receive the result. Here only
+`ComponentFactory` is visible from outside; `ComponentApiImpl` remains hidden.
 
-When the component needs configuration — values that are optional, or that the client
-*must* supply before a valid instance can exist — expose a **builder** in the API module.
-To avoid circular module dependencies, the builder should produce a stable, read-only
-configuration data class (`ComponentConfig`) that is then passed to the factory or DI
-setup, rather than instantiating the implementation class directly inside the API module.
-This keeps required wiring explicit and self-documenting while still hiding the
-implementation.
+### Option B — Configuration for the factory
+
+When the component needs configuration — optional knobs or hard requirements — prefer
+Kotlin's own tools before reaching for a builder: **named arguments with defaults** plus
+validation.
 
 ```kotlin
 // module: $component-api
-data class ComponentConfig(
-    val timeoutMs: Long,
-    val storage: Storage,
-)
-
-class ComponentBuilder {
-    private var timeoutMs: Long = 5000L
-    private var storage: Storage? = null
-
-    // optional configuration
-    fun withTimeout(ms: Long): ComponentBuilder = apply { this.timeoutMs = ms }
-
-    // mandatory configuration: build() fails if it was never supplied
-    fun withStorage(storage: Storage): ComponentBuilder = apply { this.storage = storage }
-
-    fun build(): ComponentConfig {
-        val storage = storage ?: error("Storage is required")
-        return ComponentConfig(timeoutMs, storage)
+class ComponentConfig(
+    val timeout: Duration = 5.seconds,
+    val maxRetries: Int = 3,
+) {
+    init {
+        require(timeout.isPositive()) { "timeout must be positive" }
+        require(maxRetries >= 0) { "maxRetries must be >= 0" }
     }
+}
+
+// module: $component-impl
+object ComponentFactory {
+    fun create(
+        storage: Storage,                          // mandatory: no default
+        config: ComponentConfig = ComponentConfig(),
+    ): ComponentApi = ComponentApiImpl(storage, config)
+}
+
+// composition root
+val component = ComponentFactory.create(
+    storage = fileStorage,
+    config = ComponentConfig(timeout = 10.seconds),
+)
+```
+
+Mandatory collaborators are parameters without defaults — the compiler enforces them, no
+runtime "was it set?" check is needed. Keep collaborators (interfaces such as `Storage`) out
+of the config class: the config holds plain values, the factory takes the collaborators.
+
+Use a **builder or a configuration DSL** (`ComponentConfig { timeout = 10.seconds }`) only
+when named arguments stop scaling: many interdependent options, Java callers, or a
+configuration that is assembled step by step. The builder lives in the API module and
+produces the config — never the implementation.
+
+### Option C — Dependency injection (optional refinement)
+
+Dependency injection is **one possible way** to deliver the instance, not a requirement. The
+impl module contributes a binding, the composition root loads it, and the client declares
+the interface as a constructor parameter. Example with Koin — DSL:
+
+```kotlin
+// module: $component-impl
+val componentModule = module {
+    single<ComponentApi> { ComponentApiImpl(storage = get()) }
 }
 ```
 
-The client passes the resulting `ComponentConfig` to the public entry point (the factory
-from Option B, or a DI definition), which hands it on to the `internal` implementation —
-so the API module never references the concrete class.
-
-Use a builder when there are enough configuration knobs — or hard requirements — that a
-single factory call would be awkward or easy to misuse. For one or two simple
-collaborators, a factory (Option A or B) is usually clearer.
-
-### Option D — Dependency injection (optional refinement)
-
-Dependency injection is **one possible way** to deliver the instance, not a requirement.
-With a DI framework like Koin (using Koin Annotations), the implementation module
-automatically binds the implementation to the interface via `@Single` or `@Factory`. The
-client injects the dependency without knowing the concrete class.
+or Koin Annotations, where the impl binds itself via `@Single` / `@Factory`:
 
 ```kotlin
 // module: $component-impl
 @Single(binds = [ComponentApi::class])
-internal class ComponentApiImpl : ComponentApi { /* ... */ }
-```
+internal class ComponentApiImpl(private val storage: Storage) : ComponentApi { /* ... */ }
 
-The binding only takes effect once the implementation module is loaded at the composition
-root. With Koin Annotations you declare a module in `$component-impl` and load its
-generated `.module` extension from `:app`:
-
-```kotlin
-// module: $component-impl
 @Module
 @ComponentScan
 class ComponentImplModule
@@ -288,20 +340,66 @@ class ComponentImplModule
 ```kotlin
 // module: :app (composition root) — the only place allowed to depend on $component-impl
 startKoin {
-    modules(ComponentImplModule().module)
+    modules(componentModule)                  // DSL
+    // modules(ComponentImplModule().module)  // Annotations
 }
 ```
 
-This automates what the other options do by hand, at the cost of adopting the framework,
-and reinforces the rule that only `:app` wires the `:impl` modules into the object graph.
+This automates what Option A does by hand, at the cost of adopting the framework. It
+reinforces — it does not replace — the rule that only the composition root wires the
+`:impl` modules into the object graph.
+
+## The composition root
+
+The composition root is the module that wires the object graph — usually the
+application/executable module. Every **runnable target has its own** composition root (an
+Android app, an iOS app, a desktop app, a server, a CLI tool), and each may choose a
+different impl for the same API (e.g. a platform-specific storage).
+
+- It is the only kind of module allowed to depend on `:impl` modules.
+- It creates instances (factory or DI) and hands them to clients.
+- **Platform handles** (an Android `Context`, a window, a file-system root) are passed in
+  from here as factory parameters. If a platform library forces a process-global
+  initialisation, keep that inside the impl module and expose a single explicit
+  `install(...)`-style function that only the composition root calls.
+
+## Enforcing the module rules
+
+A rule that is only a convention erodes. Make the build fail instead. A minimal check in a
+convention plugin applied to every module:
+
+```kotlin
+// build-logic: convention plugin applied to all modules
+val compositionRoots = setOf(":app")   // every runnable module
+
+afterEvaluate {
+    if (path in compositionRoots) return@afterEvaluate
+    configurations.configureEach {
+        dependencies.withType<ProjectDependency>().configureEach {
+            val target = path   // ProjectDependency.path (Gradle 8.11+)
+            check(!target.endsWith(":impl") && !target.endsWith("-impl")) {
+                "${project.path} depends on $target — only composition roots may depend on impl modules"
+            }
+        }
+    }
+}
+```
+
+Dedicated module-graph assertion plugins offer the same with more options (allowed /
+forbidden edges, rendered graphs). Whatever the tool, the forbidden edge must break CI.
 
 ## Unit Testing: Mocks vs. Fakes
 
-Decoupling the API from the implementation lets client modules be tested in isolation. Instead of standing up real databases, networks, or a full dependency tree, the test uses a **test double** (either a dynamic mock or a hand-written fake) that implements the public interface. Because clients only depend on `$component-api`, they never need `$component-impl` to run their unit tests.
+Decoupling the API from the implementation lets client modules be tested in isolation.
+Instead of standing up real databases, networks, or a full dependency tree, the test uses a
+**test double** (either a dynamic mock or a hand-written fake) that implements the public
+interface. Because clients only depend on `$component-api`, they never need
+`$component-impl` to run their unit tests.
 
 ### Option A — Mocking with Mokkery (Kotlin Multiplatform)
 
-If the project is a Kotlin Multiplatform (KMP) project, Mokkery is a great compiler-plugin-based mocking tool:
+If the project is a Kotlin Multiplatform (KMP) project, Mokkery is a great
+compiler-plugin-based mocking tool:
 
 ```kotlin
 // module: $client-feature-test (KMP / Multiplatform)
@@ -351,7 +449,9 @@ fun viewModel_exposes_loaded_user_mockk() = runTest {
 
 ### Option C — Fake Implementations (Fakes)
 
-Instead of using mocking libraries (which rely on reflection or compiler plugins, compile slower, and can make tests fragile to refactoring), you can write a manual **Fake** (test double) that implements the stable API interface.
+Instead of using mocking libraries (which rely on reflection or compiler plugins, compile
+slower, and can make tests fragile to refactoring), you can write a manual **Fake** (test
+double) that implements the stable API interface.
 
 Fakes can live in the client's test source set or be shared via an `:api-test` module:
 
@@ -393,7 +493,36 @@ fun viewModel_exposes_loaded_user_fake() = runTest {
 }
 ```
 
-Being able to swap implementations so easily in tests is one of the strongest reasons for the api/impl split.
+### Good practices for test doubles
+
+- **Ship one shared fake with the component** in a small test-support module that depends
+  only on `$component-api`, so every client reuses it instead of writing its own. Gradle's
+  `testFixtures` is JVM-only; in Kotlin Multiplatform use a regular module.
+- **Write a contract test once and run it against every implementation** — the real impl
+  and the fake — so the fake cannot drift from the real behaviour:
+
+  ```kotlin
+  abstract class ComponentApiContractTest {
+      abstract fun createSubject(): ComponentApi
+
+      @Test
+      fun saved_data_is_loaded_back() = runTest {
+          val api = createSubject()
+          api.saveData(SampleData("Ada", 36))
+          assertEquals("Ada", api.loadData().userName)
+      }
+  }
+
+  class FakeComponentApiTest : ComponentApiContractTest() {
+      override fun createSubject(): ComponentApi = FakeComponentApi()
+  }
+  ```
+
+- **Test the impl inside the impl module.** Its own test source set sees `internal`
+  declarations, so `internal` never forces you to widen visibility for tests.
+
+Being able to swap implementations so easily in tests is one of the strongest reasons for
+the api/impl split.
 
 ## What the client sees
 
@@ -401,12 +530,16 @@ Regardless of which entry point is chosen, the client's view is identical and mi
 
 ```kotlin
 // client module — depends ONLY on $component-api
-val component: ComponentApi = /* factory call, builder.build(), or DI lookup */
-val data = component.loadData()
+class MyViewModel(private val component: ComponentApi) {
+    suspend fun loadUser() {
+        val data = component.loadData()
+        /* ... */
+    }
+}
 ```
 
-The client knows the interface and the entry point. It knows nothing about
-`ComponentApiImpl`, and a change to the implementation module never forces the client to
+The client knows the interface. It knows nothing about `ComponentApiImpl`, the factory or
+the DI framework, and a change to the implementation module never forces the client to
 recompile against a new type.
 
 ## Common Anti-patterns
@@ -414,7 +547,9 @@ recompile against a new type.
 Watch out for these common design mistakes that break the Dependency Inversion Principle:
 
 ### Anti-pattern 1: Leaking Concrete/Internal Types in the API
-The `:api` module must not reference any concrete classes from `:impl`. Furthermore, it should not expose internal-only concepts or external libraries that clients shouldn't know about.
+The `:api` module must not reference any concrete classes from `:impl`. Furthermore, it
+should not expose internal-only concepts or external libraries that clients shouldn't know
+about.
 
 ```kotlin
 // ❌ BAD: The API interface exposes the concrete internal implementation class
@@ -429,7 +564,8 @@ interface ComponentApi {
 }
 ```
 
-*Solution:* Always return stable interfaces, standard library types, or pure domain data classes declared in the `:api` module.
+*Solution:* Always return stable interfaces, standard library types, or pure domain data
+classes declared in the `:api` module.
 
 ### Anti-pattern 2: Cross-Feature `:impl` Dependencies
 A feature module `:feature-a-impl` should never declare a dependency on `:feature-b-impl`.
@@ -439,10 +575,14 @@ A feature module `:feature-a-impl` should never declare a dependency on `:featur
 > The diagram is generated from [`anti-pattern-cross-dependency.puml`](anti-pattern-cross-dependency.puml) with
 > `plantuml -tpng anti-pattern-cross-dependency.puml`.
 
-*Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring between feature implementations must happen exclusively at the composition root (e.g. `:app` module).
+*Solution:* `:feature-a-impl` must only depend on `:feature-b-api`. The actual wiring
+between feature implementations must happen exclusively at the composition root (e.g. `:app`
+module) — and the build should enforce it (see *Enforcing the module rules*).
 
 ### Anti-pattern 3: Circular Gradle Dependencies
-This happens when you try to create an instance of the implementation directly inside the `:api` module. Because `:impl` depends on `:api`, `:api` cannot depend on `:impl` without creating a circular dependency.
+This happens when you try to create an instance of the implementation directly inside the
+`:api` module. Because `:impl` depends on `:api`, `:api` cannot depend on `:impl` without
+creating a circular dependency.
 
 ```kotlin
 // ❌ BAD: Creating a circular dependency by referencing the concrete implementation in API
@@ -452,23 +592,46 @@ object ComponentApiFactory {
 }
 ```
 
-*Solution:* Use a public entry point that delegates creation (e.g. a runtime registry / factory lambda pattern, a factory class in `:impl` referenced only by the composition root, or dependency injection).
+*Solution:* Move the factory into `:impl` and call it only from the composition root
+(Option A), or let a DI framework do the wiring (Option C).
+
+### Anti-pattern 4: A Registry or Service Locator in the API Module
+Because the API module cannot reference the implementation, it is tempting to add a global
+registry that the impl module fills at startup and that clients pull instances from.
+
+```kotlin
+// ❌ BAD: module: $component-api
+object ComponentRegistry {
+    lateinit var factory: () -> ComponentApi
+}
+
+// somewhere in a client
+val component = ComponentRegistry.factory()
+```
+
+Dependencies become invisible, the order of initialisation matters, a forgotten
+registration fails only at runtime, and tests have to reset global state.
+
+*Solution:* Pass instances in — the composition root creates them and hands them to clients
+via constructor parameters or DI.
 
 ## Summary of the rules
 
-- The API surface is a contract; treat it as immutable between major versions.
-- Put the contract (interfaces + public data types) in `$component-api`.
-- Keep `$component-api` pure Kotlin: avoid dependencies on databases, network, or
-  platform libraries.
-- Put the implementation in `$component-impl`, marked `internal`/`private`.
+- The API surface is a contract; treat it as stable between major versions. Use explicit
+  API mode, and ABI validation where binaries are consumed separately.
+- Put the contract (interfaces + public data types) in `$component-api`; keep it free of
+  database, network and platform libraries.
+- Put the implementation in `$component-impl`, marked `internal`/`private`. It depends on
+  `$component-api` via `api(...)`, on everything else via `implementation(...)`.
 - Clients depend on `$component-api` only.
-- **No feature module may depend directly on another feature's `:impl` module.** Only the
-  composition root (typically the `:app` module, which loads the DI modules) is allowed to
-  depend on `$component-impl` modules, so that it alone wires the object graph.
-- Expose a public **entry point** so clients can obtain an instance typed as the
-  interface, without depending on the implementation. A factory is the common shape, but
-  a factory object, a builder (for optional or mandatory configuration), or dependency
-  injection all satisfy this — choose per component.
+- **No feature module may depend directly on another feature's `:impl` module.** Only
+  composition roots may depend on `$component-impl` modules, and the build enforces it.
+- Each runnable target is its own composition root: it creates instances through the impl's
+  public entry point (factory, factory + config, or DI) and passes them in. Platform
+  handles come in as factory parameters.
+- Prefer named arguments with defaults over builders; prefer passing instances over
+  registries / service locators.
 - Further interfaces follow the **same pattern**: declared in the API module, implemented
   `internal`ly, obtained through the public surface.
-
+- Clients are tested against the contract (mock or shared fake); fakes and the real impl
+  pass the same contract test.
