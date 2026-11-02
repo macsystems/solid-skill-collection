@@ -10,7 +10,7 @@ Each skill is a self-contained folder with a `SKILL.md` file. The format follows
 
 | Skill | What it does |
 | ----- | ------------ |
-| [`dependency-inversion-principle`](skills/dependency-inversion-principle/) | Split a component into a stable public `api` module and a hidden `impl` module so clients depend only on the contract — covers factory/builder/DI entry points and module-coupling rules. |
+| [`dependency-inversion-principle`](skills/dependency-inversion-principle/) | Split a component into a stable public `api` module and a hidden `impl` module so clients depend only on the contract — covers factory/config/DI entry points, Gradle/Maven setup, ABI stability, enforced module-coupling rules and testing with mocks, fakes and contract tests. |
 
 ## Installation
 
